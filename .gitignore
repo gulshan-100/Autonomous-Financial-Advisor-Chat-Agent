@@ -11,6 +11,6 @@ env/
 "AI Engineering Challenge_ Autonomous Financial Advisor Chat Agent.docx"
 
 # Local data if needed
-*.json
+# *.json
 # Actually, the user might want the JSON data files since they are part of the assignment.
 # I'll keep them for now unless specified otherwise.
