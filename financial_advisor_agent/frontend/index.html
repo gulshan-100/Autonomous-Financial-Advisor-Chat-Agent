@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FinAdvisor AI — Autonomous Financial Advisor</title>
+  <meta name="description" content="AI-powered autonomous financial advisor with real-time portfolio analysis, market intelligence, and causal chain reasoning." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ── Topbar ─────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo-icon">💹</div>
+      <span class="brand-name">FinAdvisor AI</span>
+    </div>
+
+    <!-- Live ticker — populated from /api/registry dynamically -->
+    <div class="topbar-ticker">
+      <div class="ticker-track" id="ticker-track">
+        <!-- JS renders ticker items from market data -->
+      </div>
+    </div>
+
+    <div class="topbar-status">
+      <span class="market-date" id="market-date">Loading...</span>
+      <span class="status-badge" id="market-status-badge">...</span>
+    </div>
+  </header>
+
+  <!-- ── Sidebar ────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="overflow-sidebar">
+
+      <!-- Portfolio Selection -->
+      <div class="sidebar-section">
+        <div class="section-label">Portfolio</div>
+        <!-- Populated dynamically by JS from /api/registry -->
+        <select class="portfolio-select" id="portfolio-select">
+          <option value="">— None selected —</option>
+        </select>
+      </div>
+
+      <!-- Portfolio Panel (shown when a portfolio is selected) -->
+      <div class="sidebar-section">
+        <div class="portfolio-panel" id="portfolio-panel">
+          <div class="portfolio-header">
+            <div>
+              <div class="portfolio-name" id="pf-name">–</div>
+              <div class="portfolio-type" id="pf-type">–</div>
+            </div>
+          </div>
+          <div class="portfolio-value" id="pf-value">–</div>
+          <div class="portfolio-change" id="pf-day-change">–</div>
+
+          <div class="risk-badges" id="pf-risk-badges" style="margin-top:10px;"></div>
+
+          <div class="sector-label" style="margin-top:14px;margin-bottom:6px;font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--text-3);text-transform:uppercase;">Sector Allocation</div>
+          <div class="sector-bars" id="pf-sector-bars"></div>
+        </div>
+
+        <!-- Placeholder when no portfolio selected -->
+        <div id="no-portfolio-hint" style="color:var(--text-3);font-size:12px;text-align:center;padding:10px 0;">
+          Select a portfolio to see analytics
+        </div>
+      </div>
+
+      <!-- Market Overview -->
+      <div class="sidebar-section">
+        <div class="section-label">Market Overview</div>
+        <div class="market-mini" id="market-mini">
+          <!-- Populated dynamically from /api/market/snapshot -->
+          <div class="skeleton" style="width:100%;height:14px;margin:4px 0;"></div>
+          <div class="skeleton" style="width:80%;height:14px;margin:4px 0;"></div>
+          <div class="skeleton" style="width:90%;height:14px;margin:4px 0;"></div>
+        </div>
+        <div class="breadth-row" id="breadth-row" style="margin-top:10px;"></div>
+      </div>
+
+      <!-- FII / DII -->
+      <div class="sidebar-section">
+        <div class="section-label">Institutional Flow</div>
+        <div id="fii-dii-panel" style="font-size:12px;display:flex;flex-direction:column;gap:6px;">
+          <div class="skeleton" style="width:100%;height:12px;"></div>
+          <div class="skeleton" style="width:60%;height:12px;"></div>
+        </div>
+      </div>
+
+      <!-- Sector Heatmap -->
+      <div class="sidebar-section">
+        <div class="section-label">Sector Heatmap</div>
+        <div id="sector-heatmap" style="display:flex;flex-direction:column;gap:5px;"></div>
+      </div>
+
+    </div><!-- /overflow-sidebar -->
+  </aside>
+
+  <!-- ── Chat Area ──────────────────────────────────────────── -->
+  <main class="chat-area">
+
+    <!-- Reasoning Progress Tracker -->
+    <div class="reasoning-tracker" id="reasoning-tracker">
+      <span class="tracker-label">Reasoning:</span>
+      <div class="tracker-nodes" id="tracker-nodes"></div>
+    </div>
+
+    <!-- Chat Messages -->
+    <div class="chat-messages" id="chat-messages">
+      <!-- Welcome card — shown initially -->
+      <div class="welcome-card" id="welcome-card">
+        <div class="welcome-icon">🤖</div>
+        <div class="welcome-title">Your AI Financial Advisor</div>
+        <div class="welcome-subtitle" id="welcome-subtitle">
+          Powered by GPT-4o + LangGraph reasoning.<br/>
+          Select a portfolio and start asking — I analyse markets, portfolios, and news in real time.
+        </div>
+      </div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <!-- Quick action chips — built dynamically from live market data -->
+      <div class="quick-chips" id="quick-chips">
+        <!-- Rendered by JS with real current data -->
+      </div>
+
+      <div class="input-row">
+        <textarea
+          class="input-field"
+          id="user-input"
+          placeholder="Ask me anything about your portfolio or the market..."
+          rows="1"
+        ></textarea>
+        <button class="send-btn" id="send-btn" title="Send">➤</button>
+      </div>
+    </div>
+
+  </main>
+
+</div><!-- /app-shell -->
+
+<script src="script.js"></script>
+</body>
+</html>
