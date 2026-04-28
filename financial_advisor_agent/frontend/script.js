@@ -540,10 +540,6 @@ async function sendMessage() {
 
 function showReasoningTracker() {
   trackerState.steps = [];
-  const tracker = $('reasoning-tracker');
-  const nodes   = $('tracker-nodes');
-  tracker.classList.add('visible');
-  nodes.innerHTML = '';
 }
 
 /**
@@ -551,39 +547,13 @@ function showReasoningTracker() {
  * Returns the created element so callers can update it later.
  */
 function addTrackerStep(label, status) {
-  const nodes = $('tracker-nodes');
-  if (!nodes) return null;
-
-  // Add separator between steps
-  if (trackerState.steps.length > 0) {
-    const sep = document.createElement('span');
-    sep.className = 'tracker-sep';
-    sep.textContent = '→';
-    nodes.appendChild(sep);
-  }
-
-  const el = document.createElement('span');
-  el.className = `tracker-node ${status}`;
-  el.textContent = label;
-  nodes.appendChild(el);
-  trackerState.steps.push(el);
-  return el;
+  return null;
 }
 
-/**
- * Mark the most recently added tracker step as done.
- */
-function markLastTrackerStep(status) {
-  const last = trackerState.steps[trackerState.steps.length - 1];
-  if (last) last.className = `tracker-node ${status}`;
-}
+function markLastTrackerStep(status) {}
 
 function hideReasoningTracker() {
-  setTimeout(() => {
-    const tracker = $('reasoning-tracker');
-    if (tracker) tracker.classList.remove('visible');
-    trackerState.steps = [];
-  }, 2000);
+  trackerState.steps = [];
 }
 
 // ── LLM-as-a-Judge Panel ──────────────────────────────────────────────────────
