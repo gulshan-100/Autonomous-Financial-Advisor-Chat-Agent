@@ -1,161 +1,437 @@
 # Autonomous Financial Advisor Chat Agent
 
-An AI-powered financial advisor that **reasons through market data** — not just reports it.  
-Built with LangGraph, GPT-4o, and FastAPI. The agent autonomously decides which data tools to call, builds causal chains linking macro events to portfolio impact, and evaluates its own response quality.
+> **An AI agent that doesn't just report financial data — it reasons through it.**
+> Built on GPT-4o + LangGraph with a true ReAct loop, 11 financial tools, a causal chain engine, LLM-as-a-Judge self-evaluation, and a real-time streaming chat UI.
 
-## Assignment Coverage
+---
 
-| Phase | Requirement | Implementation |
-|-------|-------------|----------------|
-| **1: Market Intelligence** | Trend analysis (NIFTY/SENSEX) | `MarketAnalyzer._analyze_index_trends()` + `_compute_overall_sentiment()` |
-| | Sector extraction | `DataRegistry.sector_to_stocks` + `_rank_sectors()` |
-| | News classification | `NewsProcessor` — sentiment, scope (MARKET_WIDE/SECTOR/STOCK), impact level |
-| **2: Portfolio Analytics** | Daily P&L | `PortfolioAnalyzer.analyze()` → `day_change_pct`, `day_change_absolute` |
-| | Asset allocation | `sector_allocation` + `asset_type_allocation` breakdown |
-| | Risk detection | Configurable thresholds: sector >30% warning, >60% critical, single-stock >15%, high-beta >1.2 |
-| **3: Autonomous Reasoning** | Causal linking | `build_causal_chain` tool: macro → sector → stock → portfolio P&L |
-| | Conflict resolution | `conflict_flag` in news + `identify_conflict_signals()` |
-| | Prioritization | News ranked by `impact_level × |sentiment_score|`; agent only surfaces high-impact signals |
-| | Agent autonomy | True ReAct loop: LLM reasons → calls tools → reasons → answers. 11 tools, `think` for planning |
-| **4: Observability** | Tracing | Langfuse integration (`agent/tracing.py`) — prompts, responses, token usage |
-| | Self-evaluation | LLM-as-a-Judge (`agent/nodes/judge.py`) — 6-dimension quality scoring |
-| | Confidence score | Every response ends with `**Confidence: HIGH/MEDIUM/LOW**` + justification |
-| **Architecture** | Modularity | 3 layers: `data_layer/` → `agent/` → `app/` |
-| | Latency | Simple queries: 1 tool call. Deep analysis: parallel multi-tool calls |
-| | Type hints | Full type annotations across all modules |
-| | Missing data | Graceful `try/except` in every tool with informative error messages |
+## What This Does
 
-## Architecture
+Ask it anything finance-related and it will autonomously decide which data to fetch, reason through causal links between macro events and your portfolio, flag risks you didn't ask about, and score the quality of its own answer. Example output:
+
+> *"Your portfolio fell **-2.73%** (₹-57,390) today primarily because **BANKING** — where you have a **critical 91.58% concentration** — sold off after the RBI rate hike news. Your largest holding **HDFC Bank (22.62% weight)** dropped **-3.1%**, contributing roughly **₹-35,000** to your loss. Note: there's a conflict signal — Kotak Mahindra's strong Q4 results are positive for banking but the sector is still down due to macro pressure overriding stock-specific news. **Confidence: HIGH** — derived from portfolio data, causal chain analysis, and 4 corroborating news sources."*
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| LLM | GPT-4o (via `langchain-openai`) |
+| Agent Framework | LangGraph `StateGraph` — ReAct loop |
+| Backend | FastAPI + Server-Sent Events (SSE) |
+| Tracing | Langfuse (optional) |
+| Config | Pydantic `BaseSettings` + `.env` |
+| Frontend | Vanilla JS + CSS — fully dynamic, no hardcoded data |
+
+---
+
+## Project Structure
 
 ```
 financial_advisor_agent/
-├── config.py                    # Pydantic Settings — all config from .env
-├── run.py                       # Startup script
+│
+├── config.py                      # All settings from .env — zero hardcoding
+├── run.py                         # python run.py → starts server
 ├── requirements.txt
-├── .env.example                 # Template — copy to .env
+├── .env.example                   # Copy to .env, add OPENAI_API_KEY
 │
-├── data_layer/                  # Phase 1 + 2: Market Intelligence + Portfolio Analytics
-│   ├── loader.py                # Loads 6 JSON data files at startup
-│   ├── registry.py              # DataRegistry: auto-discovers all entities (zero hardcoding)
-│   ├── portfolio_analyzer.py    # P&L, sector allocation, risk flags, causal summaries
-│   ├── market_analyzer.py       # Index trends, sector ranking, FII/DII, macro themes
-│   └── news_processor.py        # Sentiment aggregation, causal chain builder, conflict detection
+├── data_layer/                    ← Market Intelligence + Portfolio Analytics
+│   ├── loader.py                  # Loads 6 JSON files once at startup
+│   ├── registry.py                # DataRegistry: auto-discovers all entities
+│   ├── portfolio_analyzer.py      # P&L, allocation, risk flags, causal summary
+│   ├── market_analyzer.py         # Index trends, sector ranking, FII/DII, breadth
+│   └── news_processor.py          # Sentiment, causal chains, conflict detection
 │
-├── agent/                       # Phase 3 + 4: Autonomous Reasoning + Evaluation
-│   ├── state.py                 # Minimal AgentState: messages + session_id + portfolio_id
-│   ├── graph.py                 # LangGraph ReAct agent (financial_advisor ↔ tool_executor → judge)
-│   ├── prompts/templates.py     # SYSTEM_PROMPT (planning protocol) + JUDGE_PROMPT (scoring rubric)
-│   ├── tracing.py               # Langfuse integration (optional — auto-disabled if keys missing)
+├── agent/                         ← Autonomous Reasoning + Self-Evaluation
+│   ├── state.py                   # AgentState TypedDict (messages, session_id, portfolio_id, judge_result)
+│   ├── graph.py                   # LangGraph: financial_advisor ↔ tool_executor → response_judge → END
+│   ├── tracing.py                 # Langfuse callback handler (auto-disabled if keys missing)
+│   ├── prompts/
+│   │   └── templates.py           # SYSTEM_PROMPT (planning protocol) + JUDGE_PROMPT (6-dim rubric)
 │   ├── tools/
-│   │   └── financial_tools.py   # 11 @tool functions: think, portfolios, market, stocks, news, etc.
+│   │   └── financial_tools.py     # 11 @tool functions — the only data access path for the LLM
 │   └── nodes/
-│       └── judge.py             # LLM-as-a-Judge: 6-dimension quality scoring
+│       └── judge.py               # LLM-as-a-Judge: isolated scoring call, temperature=0.1
 │
-├── app/                         # FastAPI server + SSE streaming
-│   ├── main.py                  # Lifespan startup: data → registry → LLM → graph
-│   ├── models/request.py        # Pydantic request schemas
+├── app/                           ← FastAPI Server
+│   ├── main.py                    # Lifespan: loader → registry → LLM → graph → app.state
+│   ├── models/request.py          # ChatRequest Pydantic model
 │   └── routes/
-│       ├── chat.py              # POST /api/chat — SSE stream with tool_call + judge events
-│       ├── registry.py          # GET /api/registry — entity discovery for frontend
-│       ├── portfolio.py         # GET /api/portfolio/{id} — REST portfolio analysis
-│       └── market.py            # GET /api/market/* — REST market data
+│       ├── chat.py                # POST /api/chat — SSE streaming
+│       ├── registry.py            # GET /api/registry — entity discovery
+│       ├── portfolio.py           # GET /api/portfolio/{id}
+│       └── market.py              # GET /api/market/*
 │
-└── frontend/                    # Single-page chat UI
-    ├── index.html               # Shell only — all content built by JS from API data
-    ├── style.css                # Dark glassmorphic theme + judge panel styles
-    └── script.js                # Dynamic UI: reasoning tracker, streaming chat, judge score panel
+└── frontend/
+    ├── index.html                 # Pure HTML shell — zero data in markup
+    ├── style.css                  # Dark glassmorphic UI + judge score panel styles
+    └── script.js                  # Fetches /api/registry on load, builds all UI dynamically
 ```
 
-## ReAct Agent Flow
+---
+
+## Agent Architecture — The ReAct Loop
 
 ```
-User Query
+                        User Query
+                            │
+                            ▼
+              ┌─────────────────────────────┐
+              │    financial_advisor        │  ← GPT-4o with 11 tools bound
+              │                             │
+              │  Per turn the LLM sees:     │
+              │  • Dynamic SYSTEM_PROMPT    │
+              │  • Full conversation history│
+              │  • All prior tool results   │
+              └──────────┬──────────────────┘
+                         │
+              has tool_calls?
+             /             \
+           YES              NO  ──────────────────────────────┐
+            │                                                  │
+            ▼                                                  ▼
+  ┌──────────────────┐                          ┌─────────────────────────┐
+  │  tool_executor   │                          │    response_judge       │
+  │  (ToolNode)      │                          │                         │
+  │  Runs tools the  │                          │  Separate LLM call      │
+  │  LLM chose. Returns│                        │  temperature=0.1        │
+  │  results back to │                          │  No tool binding        │
+  │  financial_adv.  │                          │  Scores 6 dimensions    │
+  └──────────┬───────┘                          └───────────┬─────────────┘
+             │                                              │
+             └──────────── loops back ─────────►           ▼
+                                                          END
+                                             (judge_result → SSE → UI)
+```
+
+**Key principle:** The LLM drives every decision. No hardcoded routing, no pre-fetched data stuffed into prompts. The system prompt instructs the agent *what tools exist* — the agent decides *which ones to use*.
+
+---
+
+## The 11 Tools
+
+All tools are `@tool`-decorated functions in `agent/tools/financial_tools.py`. They are created via a factory `build_financial_tools(registry, settings)` that injects the data layer via closure — the LLM never touches the data layer directly.
+
+| # | Tool | What It Returns |
+|---|------|-----------------|
+| 0 | `think(thought)` | Chain-of-thought scratchpad. LLM writes its plan here before calling data tools. Returns `"Reasoning recorded."` |
+| 1 | `list_portfolios()` | All portfolio IDs, user names, types, risk profiles, current values, gain/loss % |
+| 2 | `get_portfolio_analysis(portfolio_id)` | Full holdings (stocks + MFs), daily P&L (abs + %), sector allocation, asset-type allocation, risk metrics (beta, Sharpe, volatility, max drawdown), risk flags, causal summary, top mover |
+| 3 | `get_portfolio_risk(portfolio_id)` | Risk flags cross-referenced against live market — e.g. *"BANKING: 91.6% allocation — currently -2.33% BEARISH today"*. Includes beta, Sharpe, conflict signals |
+| 4 | `get_market_overview()` | All NSE indices with values/changes, 10 sectors ranked by performance, top 5 gainers/losers, FII/DII flows, advance/decline breadth, macro themes |
+| 5 | `get_stock_details(symbol)` | Price, % change, 52-week high/low, volume, sector membership + sector performance, related news, portfolios holding this stock |
+| 6 | `get_sector_analysis(sector)` | Sector day change + sentiment, all constituent stocks, weekly trend, macro correlation factors, related news |
+| 7 | `search_news(symbol, sector, top_n)` | News with: headline, sentiment, sentiment_score, impact level, scope, affected stocks/sectors, causal factors, `conflict_flag` + conflict explanation |
+| 8 | `get_top_movers(n)` | Top N gainers and losers with symbol, price, % change, sector |
+| 9 | `get_mutual_fund_details(scheme_code)` | Fund name, category, NAV, 1Y/3Y/5Y returns, AUM, expense ratio, fund manager, top holdings |
+| 10 | `build_causal_chain(portfolio_id, symbol)` | Traces: root news event → affected sector → affected portfolio stocks → estimated P&L contribution. Returns `causal_chains[]`, `conflict_flags[]`, narrative string |
+
+### How the Agent Plans (SYSTEM_PROMPT Protocol)
+
+The system prompt enforces a **4-step planning protocol**:
+
+```
+1. THINK   → Call think() to write the plan before touching data
+2. GATHER  → Call the identified data tools
+3. REFLECT → If data reveals surprise (conflict signal, hidden risk) → think() again
+4. ANSWER  → Write response using ONLY numbers from tool results
+```
+
+With built-in multi-hop examples:
+```
+"Why is my portfolio down?"
+  → think → get_portfolio_analysis → build_causal_chain → search_news → answer
+
+"Should I buy more INFY?"
+  → think → get_stock_details(INFY) → get_sector_analysis(IT) → search_news(INFY) → get_market_overview → answer
+
+"Which sector is best today?"
+  → think → get_market_overview → answer   ← single hop is sufficient
+```
+
+---
+
+## Mock Dataset (6 JSON Files)
+
+### Market Conditions (as of April 21, 2026)
+- **NIFTY 50**: bearish, **-1.02%**
+- **SENSEX**: bearish, **-0.98%**
+- **NIFTY BANK**: **-2.33%** — worst performer
+- **NIFTY IT**: **+1.22%** — only index in green (sector divergence test case)
+- **10 Sectors**: BANKING (bearish), IT (bullish), ENERGY, PHARMA, FMCG, INFRASTRUCTURE, AUTO, METALS, REALTY, CONSUMER_DURABLES
+- **FII**: net sellers | **DII**: net buyers
+- **Advance/Decline**: 32% advancing — broad-based weakness
+
+### News Corpus (edge cases built in)
+| Scope | Examples |
+|---|---|
+| `MARKET_WIDE` | RBI interest rate hike — HIGH impact, NEGATIVE sentiment |
+| `SECTOR_SPECIFIC` | US-India trade deal discussions — IT sector, POSITIVE |
+| `STOCK_SPECIFIC` | USFDA approval for Sun Pharma — POSITIVE with `conflict_flag=true` (stock still falling due to sector drag) |
+| `STOCK_SPECIFIC` | Infosys $1.5B cloud deal — POSITIVE, HIGH impact |
+
+The `conflict_flag` articles are specifically designed to test the agent's conflict resolution logic.
+
+### Portfolio Profiles
+
+**Portfolio 1 — Rahul Sharma** (`PORTFOLIO_001`) — Diversified Growth
+- Current value: ₹28,62,785 | Day P&L: **-0.44%** (-₹12,785)
+- 38% stocks / 62% mutual funds | Max stock weight: 7.17% (TCS)
+- No concentration risk | Sectors: BANKING, IT, ENERGY, PHARMA, FMCG, INFRA, AUTO
+
+**Portfolio 2 — Priya Patel** (`PORTFOLIO_002`) — Sector-Concentrated ⚠️
+- Current value: ₹20,41,610 | Day P&L: **-2.73%** (-₹57,390)
+- 91% stocks / 9% mutual funds | Max stock weight: 22.62% (HDFC Bank)
+- **CRITICAL concentration: 91.58% in BANKING + Financial Services**
+- Built to demonstrate extreme risk detection and causal chain: RBI news → Banking sector → HDFC Bank → portfolio loss
+
+**Portfolio 3 — Arun Krishnamurthy** (`PORTFOLIO_003`) — Conservative Defensive
+- Current value: ₹43,95,242 | Day P&L: **-0.04%** (-₹1,758)
+- 21% stocks / 79% mutual funds (34% in debt funds)
+- No concentration risk | Max stock weight: 5.19% (ITC)
+
+---
+
+## Phase 1 — Market Intelligence Layer
+
+### Index Trend Analysis
+`MarketAnalyzer._analyze_index_trends()` reads every index in `market_data.json` and computes trend direction. `_compute_overall_sentiment()` aggregates across all indices → outputs `BULLISH / BEARISH / NEUTRAL`.
+
+### Sector Extraction
+`DataRegistry._build_sector_to_stocks()` scans every stock's `"sector"` field at startup — no sector names are hardcoded. `_rank_sectors()` returns all sectors sorted by `change_percent`. Adding a new sector to the JSON file makes it automatically discoverable.
+
+### News Classification
+`NewsProcessor` classifies articles by:
+- **Sentiment**: `POSITIVE / NEGATIVE / NEUTRAL / MIXED` with score `-1.0` to `+1.0`
+- **Scope**: `MARKET_WIDE | SECTOR_SPECIFIC | STOCK_SPECIFIC`
+- **Impact**: `HIGH / MEDIUM / LOW` (weighted: HIGH=3, MEDIUM=2, LOW=1)
+- **`conflict_flag`**: `true` when price action contradicts news sentiment — triggers conflict resolution in the agent
+
+---
+
+## Phase 2 — Portfolio Analytics Engine
+
+`PortfolioAnalyzer.analyze(portfolio_id)` enriches raw holdings with live market data:
+
+```python
+# For each stock holding:
+{
+  "symbol":         "HDFCBANK",
+  "market_price":   1673.45,         # from registry
+  "day_change_pct": -3.1,            # live
+  "beta":           1.15,            # from market_data
+  "week_52_high":   1794.0,
+  "trend":          "DOWNTREND",     # from historical_data
+  "risk_level":     "HIGH",          # computed: beta × weight
+  "related_news":   [...]            # top 3 news for this stock
+}
+```
+
+**Risk flags** are computed against configurable thresholds (all in `.env`):
+
+| Flag | Default Threshold | Configurable via |
+|---|---|---|
+| Sector WARNING | >30% allocation | `SECTOR_CONCENTRATION_WARNING_PCT` |
+| Sector CRITICAL | >60% allocation | `SECTOR_CONCENTRATION_CRITICAL_PCT` |
+| Single-stock WARNING | >15% weight | `SINGLE_STOCK_WARNING_PCT` |
+| High beta | β > 1.2 | `HIGH_BETA_THRESHOLD` |
+
+---
+
+## Phase 3 — Causal Chain Engine
+
+`build_causal_chain` is the core of the assignment's *"Macro News → Sector → Stock → Portfolio"* requirement:
+
+```python
+# For each HIGH/MEDIUM impact news article affecting the portfolio:
+{
+  "news_id":          "NEWS_003",
+  "headline":         "RBI raises repo rate by 50bps",
+  "sentiment":        "NEGATIVE",
+  "sentiment_score":  -0.75,
+  "impact_level":     "HIGH",
+  "affected_stocks":  ["HDFCBANK", "ICICIBANK", "SBIN"],  # intersection with holdings
+  "affected_sectors": ["BANKING"],
+  "causal_factors":   ["Higher rates compress NIM", "Loan growth slows"],
+  "pnl_contribution_estimate": -34200   # ₹ estimated P&L impact
+}
+```
+
+### Conflict Resolution
+Articles with `conflict_flag=true` (e.g. positive USFDA news for Sun Pharma while the stock is down) are surfaced in a separate `conflict_flags[]` array. The agent's system prompt explicitly requires: *"Flag conflict_flag=true news — it signals anomalies that need explicit mention."* The LLM then explains the ambiguity: macro sell-off overriding stock-specific positive catalyst.
+
+---
+
+## Phase 4 — Observability & Self-Evaluation
+
+### Langfuse Tracing
+`agent/tracing.py` wraps every graph run with a `CallbackHandler`. Tracked per run:
+- Every LLM prompt (system + messages)
+- Every completion (response content + tool calls)
+- Token usage (prompt tokens, completion tokens, cost estimate)
+- Latency per node
+- Session ID and user context
+
+Enable by setting `LANGFUSE_SECRET_KEY` + `LANGFUSE_PUBLIC_KEY` in `.env`. Gracefully no-ops if keys are missing.
+
+### LLM-as-a-Judge (`agent/nodes/judge.py`)
+
+After every final response, a **second isolated LLM call** evaluates quality:
+
+```python
+judge_llm = llm.with_config({"tags": ["judge"], "temperature": 0.1})
+# Reads: original user_query + final ai_response
+# Outputs: structured JSON scores
+```
+
+**Scoring Rubric (JUDGE_PROMPT):**
+
+| Dimension | What It Measures |
+|---|---|
+| `factual_grounding` | Are real ₹ values, exact %, named stocks cited? (0 = vague, 10 = data-rich) |
+| `causal_reasoning` | Does it explain WHY (chain) not just WHAT (list)? |
+| `completeness` | Was every part of the question answered? |
+| `actionability` | Are recommendations concrete and implementable? |
+| `risk_awareness` | Were risks proactively identified even if not asked? |
+| `conciseness` | Is length appropriate for the question complexity? |
+
+**Output JSON:**
+```json
+{
+  "scores": {
+    "factual_grounding": 9,
+    "causal_reasoning": 8,
+    "completeness": 9,
+    "actionability": 7,
+    "risk_awareness": 10,
+    "conciseness": 8
+  },
+  "overall": 8.5,
+  "verdict": "EXCELLENT",
+  "strengths": ["Rich ₹ data with exact attribution", "Proactive CRITICAL concentration flag"],
+  "improvements": ["Could suggest specific rebalancing percentages"]
+}
+```
+
+This renders as a **live score panel** below every AI response in the frontend.
+
+### Confidence Score
+Every agent response ends with a mandatory confidence line (enforced by SYSTEM_PROMPT):
+```
+**Confidence: HIGH** — derived from portfolio data, causal chain, and 3 corroborating news sources.
+```
+`HIGH` = multiple sources agree | `MEDIUM` = some signals conflict | `LOW` = data missing or contradictory
+
+---
+
+## Streaming Architecture (SSE Events)
+
+`POST /api/chat` streams these events to the frontend in real time:
+
+```
+data: {"type": "node_start",   "node": "financial_advisor",  "label": "🧠 Reasoning"}
+data: {"type": "tool_call",    "tool": "think",              "label": "💭 Planning next steps"}
+data: {"type": "tool_call",    "tool": "get_portfolio_analysis", "label": "💼 Analysing portfolio"}
+data: {"type": "tool_done",    "tool": "get_portfolio_analysis"}
+data: {"type": "tool_call",    "tool": "build_causal_chain", "label": "🔗 Building causal chain"}
+data: {"type": "tool_done",    "tool": "build_causal_chain"}
+data: {"type": "token",        "content": "Your portfolio "}
+data: {"type": "token",        "content": "fell **-2.73%**..."}
+...
+data: {"type": "judge_result", "result": {"scores": {...}, "verdict": "EXCELLENT", "overall": 8.5}}
+data: {"type": "node_end",     "node": "response_judge"}
+data: {"type": "done"}
+```
+
+The frontend **reasoning tracker** builds dynamically from these events — users see exactly which tools the agent is calling in real time before the response starts streaming.
+
+---
+
+## Data Flow (Startup to Response)
+
+```
+python run.py
     ↓
-┌─────────────────────────────────────────────┐
-│  financial_advisor (LLM with 11 tools)      │
-│                                             │
-│  1. think("User wants to know why portfolio │
-│     is down. I need portfolio data, then    │
-│     causal chain, then news.")              │
-│                                             │
-│  2. get_portfolio_analysis("P001")          │
-│  3. build_causal_chain(portfolio_id="P001") │
-│  4. search_news(sector="BANKING")           │
-│                                             │
-│  5. Final answer with causal chain +        │
-│     confidence score                        │
-└───────────────┬─────────────────────────────┘
-                ↓
-┌─────────────────────────────────────────────┐
-│  response_judge (LLM-as-a-Judge)            │
-│  Scores: Factual Grounding, Causal          │
-│  Reasoning, Completeness, Actionability,    │
-│  Risk Awareness, Conciseness → verdict      │
-└───────────────┬─────────────────────────────┘
-                ↓
-              END → SSE stream to frontend
+DataLoader          → reads 6 JSON files into memory
+DataRegistry        → auto-discovers all entities (portfolios, stocks, sectors, news, MFs)
+ChatOpenAI(gpt-4o)  → initialised with streaming=True
+build_graph()       → compiles StateGraph: 3 nodes + conditional edges + MemorySaver
+app.state           → stores loader, registry, llm, graph, settings
+
+POST /api/chat
+    ↓
+create_initial_state(user_message, portfolio_id, session_id, registry)
+    ↓ AgentState {messages: [HumanMessage], session_id, portfolio_id}
+graph.astream_events(state, config, version="v2")
+    ↓
+  [financial_advisor node]
+    SYSTEM_PROMPT.format(portfolio_hint, available_stocks, sectors, portfolio_ids)
+    llm_with_tools.invoke([SystemMessage] + messages)
+    → if tool_calls: route to tool_executor
+    → if content:    route to response_judge
+  [tool_executor node]
+    ToolNode.execute(tool_calls) → returns ToolMessages into state
+    → loops back to financial_advisor
+  [response_judge node]
+    judge_llm.invoke(JUDGE_PROMPT.format(user_query, ai_response))
+    → {"judge_result": {scores, verdict, strengths, improvements}}
+    ↓
+SSE stream → frontend
 ```
 
-The LLM decides **which tools** to call, **how many**, and **in what order** — purely based on the question. Simple questions get 1 tool call; deep analysis questions get 4–6 tool calls with multi-hop reasoning.
-
-## Tools (11)
-
-| Tool | Purpose |
-|------|---------|
-| `think` | Chain-of-thought scratchpad — plan before acting |
-| `list_portfolios` | Discover available portfolio IDs and users |
-| `get_portfolio_analysis` | Full holdings, P&L, sector allocation, risk metrics |
-| `get_portfolio_risk` | Deep risk: beta, concentration, bearish sector alerts |
-| `get_market_overview` | All indices, sector rankings, FII/DII, breadth |
-| `get_stock_details` | Price, change, sector, news for a specific stock |
-| `get_sector_analysis` | Sector performance, constituents, macro drivers |
-| `search_news` | Filter by stock/sector; sentiment, impact, causal factors |
-| `get_top_movers` | Top N gainers and losers |
-| `get_mutual_fund_details` | NAV, returns, AUM, expense ratio |
-| `build_causal_chain` | Macro → sector → stock → portfolio P&L causal chain |
-
-## SSE Events
-
-The frontend receives these Server-Sent Events during streaming:
-
-| Event | When |
-|-------|------|
-| `node_start` | Agent starts reasoning |
-| `tool_call` | Agent decided to invoke a specific tool (e.g. "📊 Fetching market overview") |
-| `tool_done` | Tool execution completed |
-| `token` | Streaming token from the final LLM response |
-| `judge_result` | Quality score from the LLM-as-a-Judge (6 dimensions + verdict) |
-| `done` | Full run complete |
+---
 
 ## Setup
 
-1. **Install dependencies:**
-   ```powershell
-   cd "Agent Assignment\financial_advisor_agent"
-   pip install -r requirements.txt
-   ```
+```powershell
+# 1. Install dependencies
+cd "Agent Assignment\financial_advisor_agent"
+pip install -r requirements.txt
 
-2. **Configure environment:**
-   ```powershell
-   copy .env.example .env
-   # Edit .env and set OPENAI_API_KEY=sk-your-key-here
-   ```
+# 2. Configure
+copy .env.example .env
+# Edit .env — set OPENAI_API_KEY=sk-...
 
-3. **Run the server:**
-   ```powershell
-   python run.py
-   ```
+# 3. Run
+python run.py
+```
 
-4. **Open in browser:** http://localhost:8000
+Open **http://localhost:8000**
 
-## Key Design Principles
+API docs at **http://localhost:8000/docs**
 
-- **Zero hardcoding**: All portfolio IDs, stock symbols, sector names, news IDs discovered at runtime from JSON
-- **True autonomy**: LLM decides which tools to call — no hardcoded pipeline or routing logic
-- **Causal reasoning**: `build_causal_chain` traces macro events through sectors to portfolio P&L
-- **Self-evaluation**: LLM-as-a-Judge scores every response on 6 quality dimensions
-- **Confidence scoring**: Every response includes a confidence assessment with justification
-- **Streaming**: SSE delivers tool-call progress + token-by-token response to the frontend
-- **Configurable thresholds**: All risk limits, model params, tracing keys in `.env`
-- **Per-session memory**: LangGraph `MemorySaver` maintains conversation history per `session_id`
-- **Langfuse tracing**: Optional but full — tracks every LLM call, token usage, latency per node
+---
+
+## REST API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/chat` | SSE stream — agent chat |
+| `GET` | `/api/registry` | All discovered entities (used by frontend on load) |
+| `GET` | `/api/registry/portfolios` | Portfolio list |
+| `GET` | `/api/portfolio/{id}` | Full portfolio analysis |
+| `GET` | `/api/portfolio/{id}/risk` | Risk flags only |
+| `GET` | `/api/portfolio/{id}/news` | Portfolio-relevant news |
+| `GET` | `/api/market/snapshot` | Full market snapshot |
+| `GET` | `/api/market/movers?n=5` | Top N gainers + losers |
+| `GET` | `/api/market/sectors` | All sectors ranked |
+| `GET` | `/api/market/sector/{name}` | Sector detail |
+| `GET` | `/api/market/stock/{symbol}` | Stock detail |
+| `GET` | `/api/market/news` | News feed (filterable by scope/sentiment) |
+
+---
+
+## Key Design Decisions
+
+**Why ReAct over a fixed pipeline?**
+A fixed 7-node pipeline wastes LLM calls — every query would pass through all nodes. ReAct scales naturally: 1 tool call for "Is market bullish?", 5–6 for "Why is my portfolio down and what should I do?".
+
+**Why a separate judge call (not inline)?**
+The judge needs the *complete* response to score it. Using `temperature=0.1` with no tools bound ensures deterministic, objective scoring isolated from the response-generation reasoning.
+
+**Why `DataRegistry` with zero hardcoding?**
+Adding a new portfolio, stock, or sector to the JSON files makes it automatically discoverable across the entire stack — agent, API, and frontend — at next startup. No code changes required.
+
+**Why `think` as a tool (not built into the prompt)?**
+Making planning a *tool call* creates an explicit, logged trace of the agent's reasoning in Langfuse. It also forces the LLM to commit its plan before acting, reducing unnecessary tool calls on complex queries.
