@@ -47,7 +47,7 @@ const TOOL_LABELS = {
 };
 
 // Dynamic tracker state — built up as tool_call events arrive
-const trackerState = { steps: [], nodeEl: null };
+const trackerState = { steps: [], panel: null, bubbleEl: null };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -436,7 +436,7 @@ async function sendMessage() {
   aiBubble.querySelector('.bubble').innerHTML = '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
 
   // Initialise reasoning tracker
-  showReasoningTracker();
+  showReasoningTracker(aiBubble);
 
   try {
     const res = await fetch('/api/chat', {
@@ -538,8 +538,10 @@ async function sendMessage() {
 
 // ── Reasoning Tracker (dynamic — built step by step as tool events arrive) ────
 
-function showReasoningTracker() {
-  trackerState.steps = [];
+function showReasoningTracker(aiBubble) {
+  trackerState.steps  = [];
+  trackerState.panel  = null;
+  trackerState.bubbleEl = aiBubble ? aiBubble.querySelector('.bubble') : null;
 }
 
 /**
@@ -547,13 +549,35 @@ function showReasoningTracker() {
  * Returns the created element so callers can update it later.
  */
 function addTrackerStep(label, status) {
-  return null;
+  const bubbleEl = trackerState.bubbleEl;
+  if (!bubbleEl) return null;
+
+  if (!trackerState.panel) {
+    bubbleEl.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.className = 'tool-progress';
+    bubbleEl.appendChild(panel);
+    trackerState.panel = panel;
+  }
+
+  const step = document.createElement('div');
+  step.className = `tool-step ${status}`;
+  step.innerHTML = `<span class="tool-step-dot"></span><span>${label}</span>`;
+  trackerState.panel.appendChild(step);
+  trackerState.steps.push(step);
+  scrollToBottom();
+  return step;
 }
 
-function markLastTrackerStep(status) {}
+function markLastTrackerStep(status) {
+  const last = trackerState.steps[trackerState.steps.length - 1];
+  if (last) last.className = `tool-step ${status}`;
+}
 
 function hideReasoningTracker() {
-  trackerState.steps = [];
+  trackerState.steps   = [];
+  trackerState.panel   = null;
+  trackerState.bubbleEl = null;
 }
 
 // ── LLM-as-a-Judge Panel ──────────────────────────────────────────────────────
@@ -701,6 +725,10 @@ function escapeHtml(text) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function sanitizeText(text) {
+  return escapeHtml(String(text || ''));
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
