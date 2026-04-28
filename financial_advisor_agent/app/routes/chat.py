@@ -18,6 +18,7 @@ Token streaming works because:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import traceback
@@ -83,60 +84,70 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     }
 
     async def event_generator():
-        try:
-            async for event in graph.astream_events(
-                initial_state,
-                config=config,
-                version="v2",
-            ):
-                event_name = event.get("event", "")
-                node_name  = event.get("name", "")
-                tags       = event.get("tags", [])
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        _DONE = None  # sentinel
 
-                # ── Agent / tool-executor / judge node lifecycle ──────────────
-                if event_name == "on_chain_start" and node_name in ALL_NODE_NAMES:
-                    yield f"data: {json.dumps({'type': 'node_start', 'node': node_name, 'label': NODE_LABELS.get(node_name, node_name)})}\n\n"
-
-                elif event_name == "on_chain_end" and node_name in ALL_NODE_NAMES:
-                    # For the judge node, extract and forward the score result
-                    if node_name == NODE_JUDGE:
-                        output = event.get("data", {}).get("output", {})
-                        jr = output.get("judge_result")
-                        if jr and "error" not in jr:
-                            yield f"data: {json.dumps({'type': 'judge_result', 'result': jr})}\n\n"
-                    yield f"data: {json.dumps({'type': 'node_end', 'node': node_name, 'label': NODE_LABELS.get(node_name, node_name)})}\n\n"
-
-                # ── Individual tool the agent decided to call ─────────────────
-                # Emitted by LangGraph when the ToolNode starts executing a tool.
-                # Lets the frontend show exactly which tool is running.
-                elif event_name == "on_tool_start":
-                    tool_name = node_name
-                    label     = TOOL_LABELS.get(tool_name, f"🔧 {tool_name}")
-                    yield f"data: {json.dumps({'type': 'tool_call', 'tool': tool_name, 'label': label})}\n\n"
-
-                elif event_name == "on_tool_end":
-                    tool_name = node_name
-                    yield f"data: {json.dumps({'type': 'tool_done', 'tool': tool_name})}\n\n"
-
-                # ── Streaming tokens from the LLM's final answer ───────────────
-                # All LLM calls are tagged "streaming_response".
-                # Tool-calling responses have empty chunk.content; only the
-                # final answer response has non-empty content → safe to stream all.
-                elif (
-                    event_name == "on_chat_model_stream"
-                    and "streaming_response" in tags
+        async def _run_graph() -> None:
+            try:
+                async for event in graph.astream_events(
+                    initial_state,
+                    config=config,
+                    version="v2",
                 ):
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'type': 'token', 'content': chunk.content})}\n\n"
+                    event_name = event.get("event", "")
+                    node_name  = event.get("name", "")
+                    tags       = event.get("tags", [])
 
-            # ── Done sentinel ─────────────────────────────────────────────────
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            flush_langfuse()
+                    # ── Agent / tool-executor / judge node lifecycle ──────────
+                    if event_name == "on_chain_start" and node_name in ALL_NODE_NAMES:
+                        await queue.put(f"data: {json.dumps({'type': 'node_start', 'node': node_name, 'label': NODE_LABELS.get(node_name, node_name)})}\n\n")
 
-        except Exception as exc:
-            logger.error("Chat stream error: %s\n%s", exc, traceback.format_exc())
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                    elif event_name == "on_chain_end" and node_name in ALL_NODE_NAMES:
+                        if node_name == NODE_JUDGE:
+                            output = event.get("data", {}).get("output", {})
+                            jr = output.get("judge_result")
+                            if jr and "error" not in jr:
+                                await queue.put(f"data: {json.dumps({'type': 'judge_result', 'result': jr})}\n\n")
+                        await queue.put(f"data: {json.dumps({'type': 'node_end', 'node': node_name, 'label': NODE_LABELS.get(node_name, node_name)})}\n\n")
+
+                    elif event_name == "on_tool_start":
+                        tool_name = node_name
+                        label     = TOOL_LABELS.get(tool_name, f"🔧 {tool_name}")
+                        await queue.put(f"data: {json.dumps({'type': 'tool_call', 'tool': tool_name, 'label': label})}\n\n")
+
+                    elif event_name == "on_tool_end":
+                        await queue.put(f"data: {json.dumps({'type': 'tool_done', 'tool': node_name})}\n\n")
+
+                    elif (
+                        event_name == "on_chat_model_stream"
+                        and "streaming_response" in tags
+                    ):
+                        chunk = event.get("data", {}).get("chunk")
+                        if chunk and hasattr(chunk, "content") and chunk.content:
+                            await queue.put(f"data: {json.dumps({'type': 'token', 'content': chunk.content})}\n\n")
+
+                await queue.put(f"data: {json.dumps({'type': 'done'})}\n\n")
+                flush_langfuse()
+
+            except Exception as exc:
+                logger.error("Chat stream error: %s\n%s", exc, traceback.format_exc())
+                await queue.put(f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n")
+            finally:
+                await queue.put(_DONE)
+
+        task = asyncio.create_task(_run_graph())
+
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=3.0)
+                    if item is _DONE:
+                        break
+                    yield item
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # keep-alive for Render / proxies
+        finally:
+            await task
 
     return StreamingResponse(
         event_generator(),
@@ -144,6 +155,7 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
         headers={
             "Cache-Control":               "no-cache",
             "X-Accel-Buffering":           "no",
+            "Connection":                  "keep-alive",
             "Access-Control-Allow-Origin": "*",
         },
     )
