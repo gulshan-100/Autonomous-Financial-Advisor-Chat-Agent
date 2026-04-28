@@ -22,6 +22,12 @@
 
 ---
 
+## Agent Workflow Diagram
+
+![Agent Workflow](financial_advisor_agent/workflow.svg)
+
+---
+
 ## Architecture — The ReAct Agent
 
 The core design is a **true ReAct loop** — the LLM autonomously decides which tools to call, in what order, and how many times, based entirely on the user's question. No fixed pipeline, no pre-fetched data stuffed into prompts.
@@ -193,6 +199,62 @@ The score panel renders live in the frontend below every AI response bubble.
 - **Langfuse tracing** — `agent/tracing.py` wraps every graph run: tracks every LLM prompt, completion, token usage, and latency per node. Enable via `LANGFUSE_SECRET_KEY` + `LANGFUSE_PUBLIC_KEY` in `.env`.
 - **Confidence score** — every response ends with `**Confidence: HIGH/MEDIUM/LOW**` + justification, enforced by the SYSTEM_PROMPT.
 - **SSE reasoning tracker** — frontend shows each tool call firing in real time (`💭 Planning → 💼 Portfolio → 🔗 Causal chain`) before the response streams.
+
+---
+
+## Langfuse — Full Tracing Integration
+
+`agent/tracing.py` implements a **production-ready Langfuse integration** using the official LangChain callback approach.
+
+### How It Works
+
+```
+get_langfuse_handler()            ← singleton: one handler shared across all requests
+        │
+        ▼
+LangfuseCallbackHandler()         ← langfuse.langchain.CallbackHandler
+        │
+        ├── injected into graph.invoke(config={"callbacks": [handler]})
+        │
+        ├── per-request metadata set in config:
+        │       langfuse_session_id  → ties all turns of a chat into one trace
+        │       langfuse_user_id     → per-user cost tracking
+        │       langfuse_tags        → ["financial-advisor"]
+        │
+        └── flush_langfuse() called after SSE stream closes
+                → ensures all batched events are sent before connection drops
+```
+
+### What Langfuse Captures Automatically
+
+| Signal | Details |
+|---|---|
+| **LLM Prompts** | Full `SystemMessage` + `HumanMessage` + tool result messages per node turn |
+| **LLM Completions** | Raw GPT-4o output — tool call JSON or final response text |
+| **Token Usage** | `prompt_tokens` · `completion_tokens` · `total_tokens` per call |
+| **Cost** | Auto-calculated from token counts + model name |
+| **Node Latency** | Per-span timing: `financial_advisor` · `tool_executor` · `response_judge` |
+| **Model Name** | Enables model comparison if you swap GPT-4o for another model |
+| **Tool Calls** | Each tool the LLM called — name + arguments + result |
+| **Judge Scores** | The 6-dimension scores are visible as a separate span |
+
+### Enable Tracing
+
+Add to `.env`:
+```env
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com   # or your self-hosted URL
+```
+
+If keys are absent, `get_langfuse_handler()` returns `None` and all tracing is silently skipped — **no code changes needed, zero runtime errors**.
+
+### Key Implementation Details
+
+- **Singleton pattern** — one `CallbackHandler` created at startup and reused across requests. Session/user context is passed per-request via `config["metadata"]`, not at handler creation time.
+- **Correct import** — uses `langfuse.langchain.CallbackHandler` (not the deprecated `langfuse.callback` path).
+- **env injection** — `pydantic-settings` loads `.env` into a `Settings` object but does NOT set `os.environ`. The tracing module explicitly injects the three keys so the Langfuse SDK can read them.
+- **Flush discipline** — `flush_langfuse()` is called at the end of every SSE stream. Without this, batched trace events can be lost when the async connection closes.
 
 ---
 
