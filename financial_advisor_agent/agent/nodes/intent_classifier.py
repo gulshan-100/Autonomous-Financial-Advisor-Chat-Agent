@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.state import AgentState
@@ -27,7 +28,7 @@ def make_intent_classifier(llm: ChatOpenAI, registry: DataRegistry):
     with registry and llm captured via closure (dependency injection).
     """
 
-    def intent_classifier(state: AgentState) -> dict:
+    def intent_classifier(state: AgentState, config: RunnableConfig = None) -> dict:
         """
         Node: Classify user intent and extract entities.
         Injects live registry entity lists into the GPT-4o prompt dynamically.
@@ -64,6 +65,7 @@ def make_intent_classifier(llm: ChatOpenAI, registry: DataRegistry):
         try:
             response = llm.invoke(
                 prompt,
+                config=config,
                 response_format={"type": "json_object"},
             )
             result = json.loads(response.content)

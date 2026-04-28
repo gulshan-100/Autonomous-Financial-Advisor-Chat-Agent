@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     high_beta_threshold: float = 1.2
     negative_sentiment_threshold: float = -0.5
 
+    # ── Langfuse Tracing (optional — leave unset to disable) ─────────────────
+    langfuse_secret_key: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_base_url: str = "https://us.cloud.langfuse.com"
+
     # ── LangGraph ─────────────────────────────────────────────────────────────
     max_chat_history: int = 20
     graph_recursion_limit: int = 25

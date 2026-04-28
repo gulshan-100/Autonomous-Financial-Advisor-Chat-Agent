@@ -10,6 +10,7 @@ import json
 import logging
 from typing import List
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.state import AgentState
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def make_advisor_synthesizer(llm: ChatOpenAI):
 
-    def advisor_synthesizer(state: AgentState) -> dict:
+    def advisor_synthesizer(state: AgentState, config: RunnableConfig = None) -> dict:
         """
         Node: Generate structured financial advice using GPT-4o.
         All input data is injected dynamically from AgentState.
@@ -134,6 +135,7 @@ def make_advisor_synthesizer(llm: ChatOpenAI):
         try:
             response = llm.invoke(
                 prompt,
+                config=config,
                 response_format={"type": "json_object"},
             )
             advice = json.loads(response.content)

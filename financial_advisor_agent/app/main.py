@@ -84,6 +84,11 @@ async def lifespan(app: FastAPI):
     app.state.graph    = graph
     app.state.settings = settings
 
+    if settings.langfuse_secret_key and settings.langfuse_public_key:
+        logger.info("✅ Langfuse tracing ENABLED → %s", settings.langfuse_base_url)
+    else:
+        logger.warning("⚠️  Langfuse tracing DISABLED — LANGFUSE_SECRET_KEY / LANGFUSE_PUBLIC_KEY not set in .env")
+
     logger.info("✅ Server ready. Open http://localhost:%d", settings.port)
     logger.info("   Portfolio IDs discovered: %s", reg.portfolio_ids)
     logger.info("   Stocks: %d | Sectors: %d | News: %d | MFs: %d",

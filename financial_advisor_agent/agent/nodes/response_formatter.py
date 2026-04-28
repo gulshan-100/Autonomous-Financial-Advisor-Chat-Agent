@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.state import AgentState
@@ -23,7 +24,7 @@ def make_response_formatter(llm: ChatOpenAI):
     # Create a streaming variant tagged for SSE capture
     streaming_llm = llm.with_config(tags=["streaming_response"])
 
-    def response_formatter(state: AgentState) -> dict:
+    def response_formatter(state: AgentState, config: RunnableConfig = None) -> dict:
         """
         Node: Convert structured advice → streaming markdown response.
         Uses the streaming LLM — FastAPI's astream_events captures tokens
@@ -60,7 +61,7 @@ def make_response_formatter(llm: ChatOpenAI):
         try:
             # streaming=True means tokens arrive chunk by chunk
             # astream_events in FastAPI captures these via "on_chat_model_stream" events
-            for chunk in streaming_llm.stream(prompt):
+            for chunk in streaming_llm.stream(prompt, config=config):
                 if hasattr(chunk, "content") and chunk.content:
                     full_response += chunk.content
         except Exception as exc:

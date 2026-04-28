@@ -25,26 +25,29 @@ const state = {
   currentNodes:      [],     // for reasoning tracker
 };
 
-// LangGraph node order for the progress tracker
-const NODE_ORDER = [
-  'intent_classifier',
-  'context_gatherer',
-  'risk_analyzer',
-  'news_reasoner',
-  'market_analyzer',
-  'advisor_synthesizer',
-  'response_formatter',
-];
-
+// ReAct agent node labels
 const NODE_LABELS = {
-  intent_classifier:   '🧠 Intent',
-  context_gatherer:    '📊 Context',
-  risk_analyzer:       '⚠️ Risk',
-  news_reasoner:       '📰 News',
-  market_analyzer:     '📈 Market',
-  advisor_synthesizer: '💡 Advice',
-  response_formatter:  '✍️ Format',
+  financial_advisor: '🧠 Reasoning',
+  tool_executor:     '🔧 Tools',
 };
+
+// Labels for individual tools the agent may call
+const TOOL_LABELS = {
+  think:                   '💭 Planning',
+  list_portfolios:         '📋 Listing portfolios',
+  get_portfolio_analysis:  '💼 Portfolio analysis',
+  get_portfolio_risk:      '⚠️ Risk assessment',
+  get_market_overview:     '📊 Market overview',
+  get_stock_details:       '📈 Stock lookup',
+  get_sector_analysis:     '🏭 Sector analysis',
+  search_news:             '📰 News search',
+  get_top_movers:          '🔝 Top movers',
+  get_mutual_fund_details: '💰 Fund data',
+  build_causal_chain:      '🔗 Causal chain',
+};
+
+// Dynamic tracker state — built up as tool_call events arrive
+const trackerState = { steps: [], nodeEl: null };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -471,11 +474,22 @@ async function sendMessage() {
 
         switch (event.type) {
           case 'node_start':
-            updateTrackerNode(event.node, 'active');
+            if (event.node === 'financial_advisor') {
+              addTrackerStep('🧠 Reasoning...', 'active');
+            }
             break;
 
           case 'node_end':
-            updateTrackerNode(event.node, 'done');
+            markLastTrackerStep('done');
+            break;
+
+          case 'tool_call':
+            // Agent decided to call this specific tool — show it
+            addTrackerStep(event.label || `🔧 ${event.tool}`, 'active');
+            break;
+
+          case 'tool_done':
+            markLastTrackerStep('done');
             break;
 
           case 'token':
@@ -489,8 +503,11 @@ async function sendMessage() {
             scrollToBottom();
             break;
 
+          case 'judge_result':
+            displayJudgePanel(aiBubble, event.result);
+            break;
+
           case 'done':
-            // Ensure final content is rendered
             if (state.streamBuffer) {
               renderStreamingContent(aiBubble.querySelector('.bubble'), state.streamBuffer);
             }
@@ -519,34 +536,127 @@ async function sendMessage() {
   }
 }
 
-// ── Reasoning Tracker ─────────────────────────────────────────────────────────
+// ── Reasoning Tracker (dynamic — built step by step as tool events arrive) ────
+
 function showReasoningTracker() {
-  const tracker  = $('reasoning-tracker');
-  const nodes    = $('tracker-nodes');
+  trackerState.steps = [];
+  const tracker = $('reasoning-tracker');
+  const nodes   = $('tracker-nodes');
   tracker.classList.add('visible');
-  nodes.innerHTML = NODE_ORDER.map((node, i) =>
-    `${i > 0 ? '<span class="tracker-sep">→</span>' : ''}
-     <span class="tracker-node" id="tn-${node}">${NODE_LABELS[node] || node}</span>`
-  ).join('');
+  nodes.innerHTML = '';
 }
 
-function updateTrackerNode(nodeName, status) {
-  const el = document.getElementById(`tn-${nodeName}`);
-  if (el) {
-    el.className = `tracker-node ${status}`;
+/**
+ * Add a new step to the tracker (called on node_start or tool_call events).
+ * Returns the created element so callers can update it later.
+ */
+function addTrackerStep(label, status) {
+  const nodes = $('tracker-nodes');
+  if (!nodes) return null;
+
+  // Add separator between steps
+  if (trackerState.steps.length > 0) {
+    const sep = document.createElement('span');
+    sep.className = 'tracker-sep';
+    sep.textContent = '→';
+    nodes.appendChild(sep);
   }
+
+  const el = document.createElement('span');
+  el.className = `tracker-node ${status}`;
+  el.textContent = label;
+  nodes.appendChild(el);
+  trackerState.steps.push(el);
+  return el;
+}
+
+/**
+ * Mark the most recently added tracker step as done.
+ */
+function markLastTrackerStep(status) {
+  const last = trackerState.steps[trackerState.steps.length - 1];
+  if (last) last.className = `tracker-node ${status}`;
 }
 
 function hideReasoningTracker() {
-  const tracker = $('reasoning-tracker');
-  // Keep visible for UX, just dim it
   setTimeout(() => {
-    tracker.classList.remove('visible');
-    NODE_ORDER.forEach(n => {
-      const el = document.getElementById(`tn-${n}`);
-      if (el) el.className = 'tracker-node';
-    });
+    const tracker = $('reasoning-tracker');
+    if (tracker) tracker.classList.remove('visible');
+    trackerState.steps = [];
   }, 2000);
+}
+
+// ── LLM-as-a-Judge Panel ──────────────────────────────────────────────────────
+
+const VERDICT_CONFIG = {
+  EXCELLENT:          { color: 'var(--emerald)',  bg: 'rgba(16,185,129,0.12)', icon: '🏆' },
+  GOOD:               { color: 'var(--accent)',   bg: 'rgba(0,212,170,0.10)',  icon: '✅' },
+  ACCEPTABLE:         { color: 'var(--amber)',    bg: 'rgba(245,158,11,0.12)', icon: '⚠️' },
+  NEEDS_IMPROVEMENT:  { color: 'var(--rose)',     bg: 'rgba(244,63,94,0.12)',  icon: '🔴' },
+};
+
+const SCORE_LABELS = {
+  factual_grounding: 'Factual Grounding',
+  causal_reasoning:  'Causal Reasoning',
+  completeness:      'Completeness',
+  actionability:     'Actionability',
+  risk_awareness:    'Risk Awareness',
+  conciseness:       'Conciseness',
+};
+
+function scoreColor(score) {
+  if (score >= 8) return 'var(--emerald)';
+  if (score >= 6) return 'var(--accent)';
+  if (score >= 4) return 'var(--amber)';
+  return 'var(--rose)';
+}
+
+function displayJudgePanel(bubbleWrapper, result) {
+  if (!result || !result.scores) return;
+
+  const verdictKey = result.verdict || 'ACCEPTABLE';
+  const vc         = VERDICT_CONFIG[verdictKey] || VERDICT_CONFIG.ACCEPTABLE;
+  const overall    = typeof result.overall === 'number' ? result.overall.toFixed(1) : '—';
+
+  // Score bars
+  const barsHtml = Object.entries(SCORE_LABELS).map(([key, label]) => {
+    const score = result.scores[key] ?? 0;
+    const pct   = score * 10;
+    const color = scoreColor(score);
+    return `
+      <div class="judge-score-row">
+        <span class="judge-score-label">${label}</span>
+        <div class="judge-bar-bg">
+          <div class="judge-bar-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <span class="judge-score-num" style="color:${color}">${score}</span>
+      </div>`;
+  }).join('');
+
+  // Strengths & improvements
+  const strengthsHtml = (result.strengths || []).map(s =>
+    `<li class="judge-strength">✓ ${sanitizeText(s)}</li>`).join('');
+  const improvHtml = (result.improvements || []).map(s =>
+    `<li class="judge-improve">↑ ${sanitizeText(s)}</li>`).join('');
+
+  const panel = document.createElement('div');
+  panel.className = 'judge-panel';
+  panel.innerHTML = `
+    <div class="judge-header">
+      <span class="judge-title">⚖️ Response Quality Score</span>
+      <span class="judge-verdict" style="color:${vc.color};background:${vc.bg}">
+        ${vc.icon} ${verdictKey.replace('_', ' ')} — ${overall}/10
+      </span>
+    </div>
+    <div class="judge-scores">${barsHtml}</div>
+    ${strengthsHtml || improvHtml ? `
+    <div class="judge-feedback">
+      ${strengthsHtml ? `<ul class="judge-list">${strengthsHtml}</ul>` : ''}
+      ${improvHtml    ? `<ul class="judge-list">${improvHtml}</ul>`    : ''}
+    </div>` : ''}`;
+
+  bubbleWrapper.appendChild(panel);
+  scrollToBottom();
 }
 
 // ── Chat bubbles ──────────────────────────────────────────────────────────────

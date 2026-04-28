@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-
 from agent.state import AgentState
 from agent.prompts.templates import CAUSAL_REASONING_PROMPT
 from agent.utils import sanitize_for_llm, safe_json_dumps
@@ -25,7 +24,7 @@ def make_news_reasoner(llm: ChatOpenAI, registry: DataRegistry, settings: Settin
 
     news_processor = NewsProcessor(registry, settings)
 
-    def news_reasoner(state: AgentState) -> dict:
+    def news_reasoner(state: AgentState, config: RunnableConfig = None) -> dict:
         """
         Node: Deep causal chain reasoning.
         Builds narrative: macro event → sector → stock → portfolio P&L.
@@ -119,7 +118,7 @@ def make_news_reasoner(llm: ChatOpenAI, registry: DataRegistry, settings: Settin
         logger.info("news_reasoner: running causal chain analysis on %d articles", len(sorted_news))
 
         try:
-            response = llm.invoke(prompt)
+            response = llm.invoke(prompt, config=config)
             causal_chain_text = response.content
         except Exception as exc:
             logger.error("news_reasoner LLM call failed: %s", exc)

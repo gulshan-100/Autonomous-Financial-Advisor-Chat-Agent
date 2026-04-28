@@ -12,6 +12,6 @@ llm = ChatOpenAI(
     api_key=api_key
 )
 
-response = llm.invoke("Hello world")
+response = llm.invoke("Hello")
 
 print(response.content)

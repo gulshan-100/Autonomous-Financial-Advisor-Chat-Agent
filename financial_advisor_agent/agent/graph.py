@@ -1,58 +1,48 @@
 """
-LangGraph StateGraph -- Financial Advisor Agent Graph.
+LangGraph ReAct Agent — Autonomous Financial Advisor.
 
-PERFORMANCE ARCHITECTURE:
-  - SIMPLE queries  : 2 LLM calls  (intent + formatter) ~5-8s
-  - MODERATE queries: 3 LLM calls, news+market in PARALLEL ~8-12s
-  - DEEP queries    : 5 LLM calls, news+market in PARALLEL ~12-18s
+Architecture: true tool-calling ReAct loop.
+  START
+    → financial_advisor  (LLM reasons, plans, calls tools)
+    → tool_executor      (executes the tools the LLM chose)  [repeated if needed]
+    → financial_advisor  (LLM sees results, reasons further or gives final answer)
+    → END
 
-Old (sequential, always): 5 LLM calls ~25-35s
+The LLM drives ALL decisions:
+  - Which tools to call (not hardcoded)
+  - In what order (not hardcoded)
+  - When it has enough data (not hardcoded)
+  - What to include in the final answer (not hardcoded)
 
-Graph topology:
-  intent_classifier
-    --> context_gatherer
-          --> [SIMPLE]  advisor_synthesizer
-          --> [MODERATE/DEEP]  risk_analyzer
-                --> news_reasoner  (PARALLEL)
-                --> market_analyzer (PARALLEL)
-                    (both join at advisor_synthesizer)
-    --> advisor_synthesizer
-          --> response_formatter --> END
+No fixed pipelines. No pre-fetching. No data stuffed into prompts before the LLM
+decides it needs it. Every data point in the final response comes from a tool call.
 """
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode
 
 from agent.state import AgentState
-from agent.nodes.intent_classifier   import make_intent_classifier
-from agent.nodes.context_gatherer    import make_context_gatherer
-from agent.nodes.risk_analyzer       import make_risk_analyzer
-from agent.nodes.news_reasoner       import make_news_reasoner
-from agent.nodes.market_analyzer     import make_market_analyzer
-from agent.nodes.advisor_synthesizer import make_advisor_synthesizer
-from agent.nodes.response_formatter  import make_response_formatter
+from agent.tools.financial_tools import build_financial_tools
+from agent.nodes.judge import make_judge
+from agent.prompts.templates import SYSTEM_PROMPT
 from data_layer.registry import DataRegistry
 from config import Settings
 
 logger = logging.getLogger(__name__)
 
 # ── Node name constants ────────────────────────────────────────────────────────
-NODE_INTENT    = "intent_classifier"
-NODE_CONTEXT   = "context_gatherer"
-NODE_RISK      = "risk_analyzer"
-NODE_NEWS      = "news_reasoner"
-NODE_MARKET    = "market_analyzer"
-NODE_ADVISOR   = "advisor_synthesizer"
-NODE_FORMATTER = "response_formatter"
+NODE_AGENT = "financial_advisor"
+NODE_TOOLS = "tool_executor"
+NODE_JUDGE = "response_judge"
 
-ALL_NODE_NAMES = [
-    NODE_INTENT, NODE_CONTEXT, NODE_RISK,
-    NODE_NEWS, NODE_MARKET, NODE_ADVISOR, NODE_FORMATTER,
-]
+ALL_NODE_NAMES = [NODE_AGENT, NODE_TOOLS, NODE_JUDGE]
 
 
 def build_graph(
@@ -61,93 +51,97 @@ def build_graph(
     llm: ChatOpenAI,
 ) -> object:
     """
-    Build and compile the optimised LangGraph StateGraph.
+    Build the ReAct financial advisor agent graph.
 
-    Key performance improvements vs. the original linear graph:
-      1. SIMPLE fast-path: skips risk_analyzer, news_reasoner, market_analyzer
-         (saves 3 LLM calls; news/market nodes do pure-Python fallback)
-      2. Parallel fan-out: for MODERATE/DEEP, news_reasoner and market_analyzer
-         run concurrently (saves ~5s vs sequential).
-      3. context_gatherer is complexity-aware: gathers less data for SIMPLE.
+    The LLM is bound with 10 financial data tools. For every user query:
+      1. LLM reads the question and thinks about what data it needs.
+      2. LLM calls one or more tools (its own decision — no hardcoded routing).
+      3. Tools execute against the data layer and return real data.
+      4. LLM reads the tool results and decides: call more tools, or answer?
+      5. When the LLM has enough data, it produces the final response.
     """
-    logger.info("Building optimised LangGraph financial advisor graph...")
+    logger.info("Building ReAct financial advisor agent...")
 
-    # ── Instantiate nodes via factories (dependency injection) ─────────────────
-    intent_node    = make_intent_classifier(llm, registry)
-    context_node   = make_context_gatherer(registry, settings)
-    risk_node      = make_risk_analyzer(registry, settings)
-    news_node      = make_news_reasoner(llm, registry, settings)
-    market_node    = make_market_analyzer(llm)
-    advisor_node   = make_advisor_synthesizer(llm)
-    formatter_node = make_response_formatter(llm)
+    # Build all tools — each wraps a data-layer call
+    tools = build_financial_tools(registry, settings)
+    logger.info("Registered tools: %s", [t.name for t in tools])
 
-    # ── StateGraph ─────────────────────────────────────────────────────────────
+    # Bind tools to LLM + tag all LLM calls for SSE streaming capture
+    llm_with_tools = llm.bind_tools(tools).with_config(tags=["streaming_response"])
+
+    # ── Agent node: the reasoning + planning core ──────────────────────────────
+
+    def agent_node(state: AgentState) -> dict:
+        """
+        Core ReAct node: the LLM reasons about what the user needs, decides
+        which tool(s) to call, and produces either tool_calls or a final answer.
+
+        On each invocation the LLM sees:
+          - A dynamic system message (tool list + portfolio hint)
+          - The full conversation history (human messages + tool results so far)
+        """
+        portfolio_id = state.get("portfolio_id")
+
+        system_content = SYSTEM_PROMPT.format(
+            portfolio_hint=(
+                f"\nThe user has pre-selected portfolio ID: '{portfolio_id}'. "
+                f"When they refer to 'my portfolio' or 'my investments', "
+                f"use get_portfolio_analysis('{portfolio_id}') automatically."
+                if portfolio_id else
+                "\nNo portfolio is currently selected by the user. "
+                "If they ask about 'my portfolio', call list_portfolios() first."
+            ),
+            available_stocks=", ".join(registry.stock_symbols[:20]) + " ...(and more)",
+            available_sectors=", ".join(registry.sector_names),
+            portfolio_ids=", ".join(registry.portfolio_ids),
+        )
+
+        messages = [SystemMessage(content=system_content)] + list(state.get("messages", []))
+        response = llm_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    # ── Routing: tools or end? ─────────────────────────────────────────────────
+
+    def should_continue(state: AgentState) -> Literal["tools", "judge"]:
+        """
+        If the LLM's last message contains tool_calls → execute those tools.
+        If it produced plain text (no tool_calls) → final answer → send to judge.
+        """
+        last_msg = state["messages"][-1]
+        if getattr(last_msg, "tool_calls", None):
+            logger.info(
+                "Agent calling tools: %s",
+                [tc["name"] for tc in last_msg.tool_calls],
+            )
+            return "tools"
+        logger.info("Agent produced final answer — routing to judge.")
+        return "judge"
+
+    # ── ToolNode: executes whichever tools the LLM chose ──────────────────────
+    tool_node = ToolNode(tools)
+
+    # ── Judge node: LLM-as-a-Judge scores the final response ──────────────────
+    judge_node = make_judge(llm)
+
+    # ── Assemble graph ─────────────────────────────────────────────────────────
     graph = StateGraph(AgentState)
+    graph.add_node(NODE_AGENT, agent_node)
+    graph.add_node(NODE_TOOLS, tool_node)
+    graph.add_node(NODE_JUDGE, judge_node)
+    graph.set_entry_point(NODE_AGENT)
 
-    graph.add_node(NODE_INTENT,    intent_node)
-    graph.add_node(NODE_CONTEXT,   context_node)
-    graph.add_node(NODE_RISK,      risk_node)
-    graph.add_node(NODE_NEWS,      news_node)
-    graph.add_node(NODE_MARKET,    market_node)
-    graph.add_node(NODE_ADVISOR,   advisor_node)
-    graph.add_node(NODE_FORMATTER, formatter_node)
-
-    # ── Entry ──────────────────────────────────────────────────────────────────
-    graph.set_entry_point(NODE_INTENT)
-
-    # intent --> context (always)
-    graph.add_edge(NODE_INTENT, NODE_CONTEXT)
-
-    # ── Complexity-based routing after context_gatherer ────────────────────────
-    # SIMPLE  --> jump directly to advisor (skip 3 nodes, saves ~15s)
-    # MODERATE/DEEP --> risk_analyzer first
     graph.add_conditional_edges(
-        NODE_CONTEXT,
-        _route_after_context,
-        {
-            "simple_path": NODE_ADVISOR,   # 2 LLM calls total
-            "full_path":   NODE_RISK,      # 5 LLM calls, parallel middle
-        },
+        NODE_AGENT,
+        should_continue,
+        {"tools": NODE_TOOLS, "judge": NODE_JUDGE},
     )
+    graph.add_edge(NODE_TOOLS, NODE_AGENT)
+    graph.add_edge(NODE_JUDGE, END)
 
-    # ── Full path: risk --> PARALLEL fan-out (news + market run simultaneously) ─
-    # LangGraph executes both concurrently when a node has two outgoing edges
-    # to different targets; both write to independent state keys.
-    graph.add_edge(NODE_RISK, NODE_NEWS)    # branch 1 (concurrent)
-    graph.add_edge(NODE_RISK, NODE_MARKET)  # branch 2 (concurrent)
-
-    # Both parallel branches converge at advisor_synthesizer.
-    # LangGraph triggers advisor_synthesizer only after BOTH complete.
-    graph.add_edge(NODE_NEWS,   NODE_ADVISOR)
-    graph.add_edge(NODE_MARKET, NODE_ADVISOR)
-
-    # ── Final formatting (always) ──────────────────────────────────────────────
-    graph.add_edge(NODE_ADVISOR,   NODE_FORMATTER)
-    graph.add_edge(NODE_FORMATTER, END)
-
-    # ── Compile with per-session memory ───────────────────────────────────────
-    memory   = MemorySaver()
+    memory = MemorySaver()
     compiled = graph.compile(checkpointer=memory)
-
-    logger.info(
-        "Graph compiled. Topology: SIMPLE=2 LLM calls, MODERATE/DEEP=parallel news+market."
-    )
+    logger.info("ReAct agent compiled with %d tools.", len(tools))
     return compiled
-
-
-# ── Routing functions ──────────────────────────────────────────────────────────
-
-def _route_after_context(state: AgentState) -> str:
-    """
-    Route based on query_complexity written by intent_classifier.
-    SIMPLE --> skip risk/news/market, go straight to advisor.
-    MODERATE/DEEP --> full path with parallel analysis.
-    """
-    complexity = state.get("query_complexity", "MODERATE")
-    if complexity == "SIMPLE":
-        logger.debug("Fast-path: SIMPLE query, skipping risk/news/market nodes")
-        return "simple_path"
-    return "full_path"
 
 
 def create_initial_state(
@@ -156,30 +150,9 @@ def create_initial_state(
     session_id: str,
     registry: DataRegistry,
 ) -> AgentState:
-    """
-    Create the initial AgentState for a new chat turn.
-    Registry entity lists are injected so all nodes can reference them
-    without importing the registry directly.
-    """
-    from langchain_core.messages import HumanMessage
-
-    return AgentState(
-        messages             = [HumanMessage(content=user_message)],
-        session_id           = session_id,
-        user_query           = user_message,
-        portfolio_id         = portfolio_id,
-        intent               = "",
-        symbols_mentioned    = [],
-        sectors_mentioned    = [],
-        urgency              = "MEDIUM",
-        query_complexity     = "MODERATE",  # overwritten by intent_classifier
-        risk_flags           = [],
-        concentration_risk   = False,
-        recommendations      = [],
-        sources_used         = [],
-        confidence_level     = "MEDIUM",
-        conflict_signals     = [],
-        available_portfolios = registry.portfolio_ids,
-        available_stocks     = registry.stock_symbols,
-        available_sectors    = registry.sector_names,
-    )
+    """Create the initial AgentState for a new chat turn."""
+    return {
+        "messages":    [HumanMessage(content=user_message)],
+        "session_id":  session_id,
+        "portfolio_id": portfolio_id,
+    }

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.state import AgentState
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def make_market_analyzer(llm: ChatOpenAI):
 
-    def market_analyzer(state: AgentState) -> dict:
+    def market_analyzer(state: AgentState, config: RunnableConfig = None) -> dict:
         """
         Node: Synthesize market data into a narrative.
         Injects dynamic market data from state into GPT-4o prompt.
@@ -78,7 +79,7 @@ def make_market_analyzer(llm: ChatOpenAI):
         logger.info("market_analyzer: running market synthesis")
 
         try:
-            response = llm.invoke(prompt)
+            response = llm.invoke(prompt, config=config)
             market_summary = response.content
         except Exception as exc:
             logger.error("market_analyzer LLM call failed: %s", exc)
