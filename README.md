@@ -280,7 +280,7 @@ done
 pip install -r requirements.txt
 
 # 2. Configure
-copy .env.example .env
+Configure the .env file
 # Set OPENAI_API_KEY=sk-...
 
 # 3. Run
